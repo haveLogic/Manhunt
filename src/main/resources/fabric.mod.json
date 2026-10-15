@@ -1,0 +1,38 @@
+{
+	"schemaVersion": 1,
+	"id": "manhunt",
+	"version": "${version}",
+	"name": "Manhunt",
+	"description": "This is an example description! Tell everyone what your mod is about!",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "GPL-3.0-only",
+	"icon": "assets/manhunt/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"islogic.manhunt.Manhunt"
+		],
+		"client": [
+			"islogic.manhunt.client.ManhuntClient"
+		]
+	},
+	"mixins": [
+		"manhunt.mixins.json",
+		{
+			"config": "manhunt.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}
