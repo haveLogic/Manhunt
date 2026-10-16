@@ -18,6 +18,8 @@ public class Manhunt implements ModInitializer {
 	// That way, it's clear which mod wrote info, warnings, and errors.
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
+	private static GameManager gameManager;   // ← 保存引用
+
 	@Override
 	public void onInitialize() {
 		// This code runs as soon as Minecraft is in a mod-load-ready state.
@@ -26,16 +28,21 @@ public class Manhunt implements ModInitializer {
 
 		LOGGER.info("Hello Fabric world!");
 
+		gameManager = new GameManager();
+
 		// 监听服务器启动完成事件
         // 服务器完全启动后，调用创建队伍的方法
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			TeamManager.createTeams(server);
-			GameState.initOnServerStart(server);   // ← 缺
+			GameState.initOnServerStart(server);
+			gameManager.reset();
 		});
 		Commands.register();
+		PlayerJoinHandler.register();
+		RunnerDeathHandler.register();
 		ServerTickEvents.END_SERVER_TICK.register(new CompassTicker());
-		ServerTickEvents.END_SERVER_TICK.register(new GameManager());   // ← 缺
-		LOGGER.info("[Manhunt] CompassTicker registered");  // ← 加这行
+		ServerTickEvents.END_SERVER_TICK.register(gameManager);
+		LOGGER.info("[Manhunt] CompassTicker registered");
 	}
 
 	public static Identifier id(String path) {
