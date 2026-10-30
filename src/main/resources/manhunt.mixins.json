@@ -3,7 +3,8 @@
 	"package": "islogic.manhunt.mixin",
 	"compatibilityLevel": "JAVA_25",
 	"mixins": [
-		"ExampleMixin"
+		"ExampleMixin",
+		"MinecraftServerAccessor"
 	],
 	"injectors": {
 		"defaultRequire": 1

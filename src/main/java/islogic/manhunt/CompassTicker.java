@@ -22,11 +22,16 @@ import java.util.*;
 import static islogic.manhunt.TeamManager.getRunners;
 
 public class CompassTicker implements ServerTickEvents.EndTick {
-    private static final int UPDATE_INTERVAL = 2; // 每 2 tick 更新一次，减轻负担
+    private static final int UPDATE_INTERVAL = 5; // 每 5 tick 更新一次，减轻负担
     private int tickCounter = 0;
 
     // 结构：玩家 UUID -> (维度 -> 该维度中的最后位置)
-    private final Map<UUID, Map<ResourceKey<Level>, Vec3>> lastKnownPositions = new HashMap<>();
+    private static final Map<UUID, Map<ResourceKey<Level>, Vec3>> lastKnownPositions = new HashMap<>();
+
+    /** 生成新世界后清空缓存，避免指南针指向上一局的位置。 */
+    public static void clearCache() {
+        lastKnownPositions.clear();
+    }
 
     @Override
     public void onEndTick(MinecraftServer server) {

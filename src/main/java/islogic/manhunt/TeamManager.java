@@ -87,4 +87,21 @@ public class TeamManager {
         }
         return runners;
     }
+
+    /**
+     * 清空 hunters / runners 两个队伍的成员（队伍本身保留）。
+     * 用于新世界生成后让所有人重新选择身份。
+     */
+    public static void clearTeams(MinecraftServer server) {
+        Scoreboard scoreboard = server.getScoreboard();
+
+        for (PlayerTeam team : scoreboard.getPlayerTeams()) {
+            if (!"hunters".equals(team.getName()) && !"runners".equals(team.getName())) {
+                continue;
+            }
+            for (String memberName : new ArrayList<>(team.getPlayers())) {
+                scoreboard.removePlayerFromTeam(memberName, team);
+            }
+        }
+    }
 }

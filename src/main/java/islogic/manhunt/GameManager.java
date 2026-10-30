@@ -14,11 +14,11 @@ public class GameManager implements ServerTickEvents.EndTick {
     private enum Phase {
         WAITING,     // 等待开局：冻结玩家，检查开始条件
         RUNNING,     // 游戏进行中：什么都不做，只等 runner 死
-        COUNTDOWN    // 重启倒计时中：每秒播报，归零就停服
+        COUNTDOWN    // 重置倒计时中：每秒播报，归零就生成新世界
     }
 
     private static final int CHECK_INTERVAL = 5;
-    private static final int RESTART_DELAY_SECONDS = 30;
+    private static final int RESET_DELAY_SECONDS = 30;
 
     private int tickCounter = 0;
 
@@ -61,26 +61,35 @@ public class GameManager implements ServerTickEvents.EndTick {
             lastBroadcastSecond = -1;
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("所有 runner 已死亡，服务器将在 "
-                            + RESTART_DELAY_SECONDS + " 秒后重启"), false);
+                            + RESET_DELAY_SECONDS + " 秒后生成新世界"), false);
         }
     }
 
-    /** 倒计时中：每秒播报，归零就 halt */
+    /** 倒计时中：每秒播报，归零就重置世界 */
     private void onCountdown(MinecraftServer server) {
         int elapsedTicks = tickCounter - countdownStartTick;
-        int secondsLeft = RESTART_DELAY_SECONDS - elapsedTicks / 20;
+        int secondsLeft = RESET_DELAY_SECONDS - elapsedTicks / 20;
 
         if (secondsLeft <= 0) {
             server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("服务器正在重启..."), false);
-            server.halt(false);
+                    Component.literal("正在生成新世界，请稍候..."), false);
+            try {
+                WorldResetter.reset(server);
+                phase = Phase.WAITING;
+                lastBroadcastSecond = -1;
+            } catch (Throwable t) {
+                Manhunt.LOGGER.error("[Manhunt] 生成新世界失败", t);
+                server.getPlayerList().broadcastSystemMessage(
+                        Component.literal("生成新世界失败，服务器将关闭"), false);
+                server.halt(false);
+            }
             return;
         }
 
         if (secondsLeft != lastBroadcastSecond) {
             lastBroadcastSecond = secondsLeft;
             server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("服务器将在 " + secondsLeft + " 秒后重启"), false);
+                    Component.literal("服务器将在 " + secondsLeft + " 秒后生成新世界"), false);
         }
     }
 
