@@ -46,6 +46,7 @@ public class GameManager implements ServerTickEvents.EndTick {
         List<ServerPlayer> runners = TeamManager.getRunners(server);
 
         if (!hunters.isEmpty() && !runners.isEmpty() && allPlayersHaveTeam(server)) {
+            RunnerTracker.begin(server);   // 快照本局的 runner，用于死亡判定
             GameState.setGameStarted(true, server);
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("游戏开始！"), false);
@@ -53,9 +54,10 @@ public class GameManager implements ServerTickEvents.EndTick {
         }
     }
 
-    /** 游戏进行中：只关心 runners 是否空了 */
+    /** 游戏进行中：只关心开局时的 runner 是否全部阵亡 */
     private void onRunning(MinecraftServer server) {
-        if (TeamManager.getRunners(server).isEmpty()) {
+        RunnerTracker.refresh(server);
+        if (RunnerTracker.isGameOver()) {
             phase = Phase.COUNTDOWN;
             countdownStartTick = tickCounter;
             lastBroadcastSecond = -1;
@@ -67,6 +69,15 @@ public class GameManager implements ServerTickEvents.EndTick {
 
     /** 倒计时中：每秒播报，归零就重置世界 */
     private void onCountdown(MinecraftServer server) {
+        // 兜底：阵亡记录被清掉时取消倒计时，避免误删档
+        if (!RunnerTracker.isGameOver()) {
+            phase = Phase.RUNNING;
+            lastBroadcastSecond = -1;
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.literal("runner 阵亡记录已清空，倒计时取消"), false);
+            return;
+        }
+
         int elapsedTicks = tickCounter - countdownStartTick;
         int secondsLeft = RESET_DELAY_SECONDS - elapsedTicks / 20;
 
@@ -99,6 +110,7 @@ public class GameManager implements ServerTickEvents.EndTick {
         tickCounter = 0;
         countdownStartTick = 0;
         lastBroadcastSecond = -1;
+        RunnerTracker.clear();
     }
 
     private void freezePlayers(MinecraftServer server) {

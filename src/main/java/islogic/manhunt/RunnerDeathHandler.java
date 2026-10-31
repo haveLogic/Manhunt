@@ -16,6 +16,9 @@ public class RunnerDeathHandler {
             MinecraftServer server = player.level().getServer();
             if (server == null) return;
 
+            // 只登记死亡，不看队伍是否为空，避免掉线被误判为阵亡
+            RunnerTracker.markDead(player);
+
             Scoreboard scoreboard = server.getScoreboard();
             String name = player.getScoreboardName();
 

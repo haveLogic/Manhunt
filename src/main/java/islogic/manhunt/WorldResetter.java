@@ -58,10 +58,13 @@ import java.util.stream.Stream;
  * <ol>
  *     <li>记录每个维度的 LevelStem，并生成新的世界种子</li>
  *     <li>死亡玩家先复活（否则会卡在死亡界面）</li>
- *     <li>把所有玩家临时传送到一个暂存维度</li>
+ *     <li>把所有玩家临时传送到一个专用暂存维度（不借用下界/末地）</li>
  *     <li>关闭旧主世界、删除区块数据、用新种子重建，并把玩家送进去</li>
  *     <li>对其余所有维度做同样的重建（此时玩家已经在新主世界里）</li>
  * </ol>
+ *
+ * <p>任何一步抛异常时，会先把玩家放回安全位置再抛出，避免把暂存维度里的
+ * 高空坐标写进玩家存档。
  */
 public final class WorldResetter {
 
@@ -94,77 +97,104 @@ public final class WorldResetter {
 
         // 2. 新的世界种子（所有维度共用，和原版一致）
         long newSeed = WorldOptions.randomSeed();
-        applyNewSeed(server, serverAccessor, newSeed);
 
-        // 3. 选一个暂存维度。正常情况下用下界/末地；
-        //    如果服务器只有主世界，就临时造一个专用维度。
-        ServerLevel parkingLevel = null;
-        for (ServerLevel level : oldLevels) {
-            if (!level.dimension().equals(Level.OVERWORLD)) {
-                parkingLevel = level;
-                break;
-            }
+        LevelStem overworldStem = stems.get(Level.OVERWORLD);
+        if (overworldStem == null) {
+            broadcast(server, "生成新世界失败：找不到主世界的生成参数");
+            Manhunt.LOGGER.error("[Manhunt] 找不到主世界 LevelStem，取消重置");
+            return;
         }
+
         ServerLevel holdingLevel = null;
-        if (parkingLevel == null) {
-            holdingLevel = createHoldingLevel(server, serverAccessor, stems.get(Level.OVERWORLD), newSeed);
-            parkingLevel = holdingLevel;
-        }
+        boolean playersMoved = false;
 
-        // 4. 死亡玩家先复活，然后所有人移出主世界
-        respawnDeadPlayers(server);
+        try {
+            applyNewSeed(server, serverAccessor, newSeed);
 
-        int parkingY = parkingY(parkingLevel);
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            player.teleportTo(parkingLevel, 0.5, parkingY, 0.5, Set.of(),
-                    player.getYRot(), player.getXRot(), false);
-        }
+            // 3. 玩家只暂存在专用临时维度，不再借用下界/末地
+            holdingLevel = createHoldingLevel(server, serverAccessor, overworldStem, newSeed);
 
-        // 5. 重建主世界
-        rebuildLevel(server, serverAccessor, oldOverworld, stems.get(Level.OVERWORLD),
-                newSeed, server.getWorldData().overworldData(), true);
-        ServerLevel newOverworld = server.overworld();
+            // 4. 死亡玩家先复活，然后所有人移出当前维度
+            respawnDeadPlayers(server);
 
-        // 6. 挑选新出生点，把玩家送进新主世界
-        BlockPos spawnPos = pickSpawn(newOverworld);
-        LevelData.RespawnData respawnData =
-                LevelData.RespawnData.of(Level.OVERWORLD, spawnPos, 0.0F, 0.0F);
-
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            resetPlayer(player);
-            player.teleportTo(newOverworld,
-                    spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5,
-                    Set.of(), player.getYRot(), player.getXRot(), false);
-            player.setRespawnPosition(new ServerPlayer.RespawnConfig(respawnData, false), false);
-        }
-
-        // 7. 重建其余所有维度（暂存维度在玩家离开后才会被关闭）
-        WorldData worldData = server.getWorldData();
-        for (ServerLevel oldLevel : oldLevels) {
-            ResourceKey<Level> key = oldLevel.dimension();
-            if (key.equals(Level.OVERWORLD)) {
-                continue;
+            int parkingY = parkingY(holdingLevel);
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                player.teleportTo(holdingLevel, 0.5, parkingY, 0.5, Set.of(),
+                        player.getYRot(), player.getXRot(), false);
+                player.fallDistance = 0.0;
+                player.setDeltaMovement(Vec3.ZERO);
+                playersMoved = true;
             }
 
-            LevelStem stem = stems.get(key);
-            if (stem == null) {
-                Manhunt.LOGGER.warn("[Manhunt] 跳过维度 {}：找不到 LevelStem", key.identifier());
-                continue;
+            // 5. 重建主世界
+            rebuildLevel(server, serverAccessor, oldOverworld, overworldStem,
+                    newSeed, server.getWorldData().overworldData(), true);
+            ServerLevel newOverworld = server.overworld();
+            if (newOverworld == null) {
+                throw new IllegalStateException("主世界重建后不存在");
             }
 
-            ServerLevelData levelData = new DerivedLevelData(worldData, worldData.overworldData());
-            rebuildLevel(server, serverAccessor, oldLevel, stem, newSeed, levelData, false);        }
+            // 6. 挑选新出生点，把玩家送进新主世界
+            BlockPos spawnPos = pickSpawn(newOverworld);
+            LevelData.RespawnData respawnData =
+                    LevelData.RespawnData.of(Level.OVERWORLD, spawnPos, 0.0F, 0.0F);
+
+            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+                resetPlayer(player);
+                player.teleportTo(newOverworld,
+                        spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5,
+                        Set.of(), player.getYRot(), player.getXRot(), false);
+                player.setRespawnPosition(new ServerPlayer.RespawnConfig(respawnData, false), false);
+            }
+
+            // 7. 重建其余所有维度（暂存维度在玩家离开后才会被关闭）
+            WorldData worldData = server.getWorldData();
+            for (ServerLevel oldLevel : oldLevels) {
+                ResourceKey<Level> key = oldLevel.dimension();
+                if (key.equals(Level.OVERWORLD)) {
+                    continue;
+                }
+
+                LevelStem stem = stems.get(key);
+                if (stem == null) {
+                    Manhunt.LOGGER.warn("[Manhunt] 跳过维度 {}：找不到 LevelStem", key.identifier());
+                    continue;
+                }
+
+                ServerLevelData levelData = new DerivedLevelData(worldData, worldData.overworldData());
+                rebuildLevel(server, serverAccessor, oldLevel, stem, newSeed, levelData, false);
+            }
+        } catch (Throwable t) {
+            // 失败兜底：先把玩家挪到安全位置，再清理临时维度
+            Manhunt.LOGGER.error("[Manhunt] 重置世界失败", t);
+            if (playersMoved) {
+                try {
+                    ensureOverworldForRescue(server, serverAccessor, stems, newSeed, t);
+                    rescuePlayers(server, holdingLevel);
+                } catch (Exception e) {
+                    Manhunt.LOGGER.error("[Manhunt] 失败兜底本身出错，直接停服", e);
+                }
+            }
+            if (holdingLevel != null) {
+                try {
+                    closeHoldingQuietly(server, serverAccessor, holdingLevel);
+                } catch (Exception e) {
+                    Manhunt.LOGGER.warn("[Manhunt] 清理临时维度失败", e);
+                }
+            }
+            throw t instanceof RuntimeException re ? re
+                    : new RuntimeException("重置世界失败", t);
+        }
 
         // 8. 清理临时暂存维度
-        if (holdingLevel != null) {
-            closeAndDelete(server, serverAccessor, holdingLevel);
-        }
+        closeAndDelete(server, serverAccessor, holdingLevel);
 
         // 9. 重置整局游戏的状态
         resetWorldTime(server);
         server.setWeatherParameters(6000, 0, false, false);
         GameState.setGameStarted(false, server);
         TeamManager.clearTeams(server);
+        RunnerTracker.clear();
         CompassTicker.clearCache();
 
         broadcast(server, "新世界已生成（所有维度已重置）！使用 /hunters 或 /runners 重新选择队伍");
@@ -199,7 +229,17 @@ public final class WorldResetter {
         ResourceKey<Level> key = oldLevel.dimension();
 
         closeAndDelete(server, accessor, oldLevel);
+        createLevel(server, accessor, key, stem, newSeed, levelData, overworld);
+    }
 
+    /** 用给定参数创建一个维度并注册到服务器；调用方负责先清理旧数据。 */
+    private static ServerLevel createLevel(MinecraftServer server,
+                                           MinecraftServerAccessor accessor,
+                                           ResourceKey<Level> key,
+                                           LevelStem stem,
+                                           long seed,
+                                           ServerLevelData levelData,
+                                           boolean overworld) {
         List<CustomSpawner> spawners = overworld ? createSpawners(accessor) : List.of();
 
         ServerLevel newLevel = new ServerLevel(
@@ -210,7 +250,7 @@ public final class WorldResetter {
                 key,
                 stem,
                 server.getWorldData().isDebugWorld(),
-                BiomeManager.obfuscateSeed(newSeed),
+                BiomeManager.obfuscateSeed(seed),
                 spawners,
                 overworld
         );
@@ -218,6 +258,7 @@ public final class WorldResetter {
         accessor.getLevels().put(key, newLevel);
         newLevel.getWorldBorder().setAbsoluteMaxSize(server.getAbsoluteMaxWorldSize());
         server.getPlayerList().addWorldborderListener(newLevel);
+        return newLevel;
     }
 
     /** 关闭维度并删除它的 region / entities / poi / data。 */
@@ -260,23 +301,7 @@ public final class WorldResetter {
             throw new RuntimeException("清理临时维度失败", e);
         }
 
-        ServerLevel level = new ServerLevel(
-                server,
-                accessor.getExecutor(),
-                accessor.getStorageSource(),
-                levelData,
-                key,
-                overworldStem,
-                false,
-                BiomeManager.obfuscateSeed(seed),
-                List.of(),
-                false
-        );
-
-        accessor.getLevels().put(key, level);
-        level.getWorldBorder().setAbsoluteMaxSize(server.getAbsoluteMaxWorldSize());
-        server.getPlayerList().addWorldborderListener(level);
-        return level;
+        return createLevel(server, accessor, key, overworldStem, seed, levelData, false);
     }
 
     private static List<CustomSpawner> createSpawners(MinecraftServerAccessor accessor) {
@@ -301,6 +326,156 @@ public final class WorldResetter {
     /** 在维度高度范围内选一个安全的暂存高度（重置过程中不会发生游戏刻，不会摔落）。 */
     private static int parkingY(ServerLevel level) {
         return Math.max(level.getMinY() + 1, Math.min(200, level.getMaxY() - 20));
+    }
+
+    /**
+     * 重置失败时把所有玩家挪到安全位置，避免把暂存维度里的高空坐标写进玩家存档。
+     * 优先（新）主世界出生点；主世界不可用时退到别的已存在维度，最后才留在暂存维度。
+     */
+    private static void rescuePlayers(MinecraftServer server, ServerLevel holdingLevel) {
+        ServerLevel target = server.overworld();
+        if (target == null || server.getLevel(Level.OVERWORLD) != target) {
+            target = pickRescueLevel(server, holdingLevel);
+        }
+        if (target == null) {
+            Manhunt.LOGGER.error("[Manhunt] 找不到可用维度，无法安置玩家");
+            return;
+        }
+
+        BlockPos pos = safeRescuePos(target, target.dimension().equals(Level.OVERWORLD));
+        Manhunt.LOGGER.warn("[Manhunt] 把玩家安置到 {} ({}, {}, {})",
+                target.dimension().identifier(), pos.getX(), pos.getY(), pos.getZ());
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            try {
+                player.teleportTo(target, pos.getX() + 0.5, pos.getY(),
+                        pos.getZ() + 0.5, Set.of(),
+                        player.getYRot(), player.getXRot(), false);
+            } catch (Exception e) {
+                Manhunt.LOGGER.warn("[Manhunt] 传送玩家 {} 失败，改用强制移动",
+                        player.getScoreboardName(), e);
+                forceMove(player, target, pos);
+            }
+            player.fallDistance = 0.0;
+            player.setDeltaMovement(Vec3.ZERO);
+
+            if (target.dimension().equals(Level.OVERWORLD)) {
+                try {
+                    LevelData.RespawnData respawn =
+                            LevelData.RespawnData.of(Level.OVERWORLD, pos, 0.0F, 0.0F);
+                    player.setRespawnPosition(
+                            new ServerPlayer.RespawnConfig(respawn, false), false);
+                } catch (Exception e) {
+                    Manhunt.LOGGER.warn("[Manhunt] 重置玩家 {} 的重生点失败",
+                            player.getScoreboardName(), e);
+                }
+            }
+        }
+    }
+
+    /** 最后手段：绕过完整传送流程（不触发维度同步包），直接把玩家挂到目标维度。 */
+    private static void forceMove(ServerPlayer player, ServerLevel target, BlockPos pos) {
+        try {
+            player.setServerLevel(target);
+            player.snapTo(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+            if (player.connection != null) {
+                player.connection.teleport(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5,
+                        player.getYRot(), player.getXRot());
+            }
+        } catch (Exception e) {
+            Manhunt.LOGGER.error("[Manhunt] 强制移动玩家 {} 也失败",
+                    player.getScoreboardName(), e);
+        }
+    }
+
+    /** 选一个还能用的维度：优先非主世界、非暂存维度，其次暂存维度。 */
+    private static ServerLevel pickRescueLevel(MinecraftServer server, ServerLevel holdingLevel) {
+        for (ServerLevel level : server.getAllLevels()) {
+            if (level != holdingLevel
+                    && server.getLevel(level.dimension()) == level) {
+                return level;
+            }
+        }
+        return holdingLevel;
+    }
+
+    /** 在主世界用世界出生点，其他维度就地取地表，实在不行才用暂存高度。 */
+    private static BlockPos safeRescuePos(ServerLevel level, boolean useSpawn) {
+        if (useSpawn) {
+            return level.getRespawnData().pos();
+        }
+        try {
+            int y = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, 0, 0);
+            if (y > level.getMinY() && y < level.getMaxY()) {
+                return new BlockPos(0, y, 0);
+            }
+        } catch (Exception e) {
+            Manhunt.LOGGER.warn("[Manhunt] 查询 {} 地表高度失败", level.dimension().identifier(), e);
+        }
+        return new BlockPos(0, parkingY(level), 0);
+    }
+
+    /**
+     * 主世界已在重建中被关闭/删除时，先用旧 LevelStem 补一个空主世界，
+     * 让玩家至少能回到一个真实存在的维度，而不是留在马上要被删掉的暂存维度。
+     */
+    private static void ensureOverworldForRescue(MinecraftServer server,
+                                                 MinecraftServerAccessor accessor,
+                                                 Map<ResourceKey<Level>, LevelStem> stems,
+                                                 long newSeed,
+                                                 Throwable cause) {
+        ServerLevel current = server.overworld();
+        if (current != null && server.getLevel(Level.OVERWORLD) == current) {
+            return;
+        }
+
+        LevelStem stem = stems.get(Level.OVERWORLD);
+        if (stem == null) {
+            Manhunt.LOGGER.error("[Manhunt] 缺少主世界 LevelStem，无法重建主世界", cause);
+            return;
+        }
+
+        Path path = accessor.getStorageSource().getDimensionPath(Level.OVERWORLD);
+        if (Files.exists(path) && !Files.isWritable(path)) {
+            // 目录不可写时区块保存会失败，但内存里仍需要一个主世界，
+            // 否则传送玩家时 PlayerList#sendLevelInfo 会因为 overworld() == null 抛异常
+            Manhunt.LOGGER.warn("[Manhunt] 主世界目录不可写，仅重建内存中的主世界");
+        }
+
+        // 重建前清掉半删除的数据，避免新维度读到残缺的区块
+        try {
+            deleteContents(path);
+        } catch (IOException e) {
+            Manhunt.LOGGER.warn("[Manhunt] 清理旧主世界数据失败，仍尝试重建主世界", e);
+        }
+
+        try {
+            createLevel(server, accessor, Level.OVERWORLD, stem, newSeed,
+                    server.getWorldData().overworldData(), true);
+            Manhunt.LOGGER.warn("[Manhunt] 已为主世界重建空维度，用于安置玩家");
+        } catch (Exception e) {
+            Manhunt.LOGGER.error("[Manhunt] 重建主世界失败，玩家将退到其他维度", e);
+        }
+    }
+
+    /** 失败路径清理临时维度；如果还有玩家留在里面就先不关，避免连玩家一起处理掉。 */
+    private static void closeHoldingQuietly(MinecraftServer server,
+                                            MinecraftServerAccessor accessor,
+                                            ServerLevel holdingLevel) {
+        if (server.getLevel(holdingLevel.dimension()) == null) {
+            return;
+        }
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.level() == holdingLevel) {
+                Manhunt.LOGGER.warn("[Manhunt] 临时维度里仍有玩家，跳过清理");
+                return;
+            }
+        }
+        try {
+            closeAndDelete(server, accessor, holdingLevel);
+        } catch (Exception e) {
+            Manhunt.LOGGER.warn("[Manhunt] 清理临时维度失败", e);
+        }
     }
 
     /** 与 MinecraftServer#setInitialSpawn 类似：在生成器给出的出生区块附近找一个安全的地表位置。 */
