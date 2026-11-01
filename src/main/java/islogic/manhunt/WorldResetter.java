@@ -44,6 +44,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -63,15 +64,20 @@ import java.util.stream.Stream;
  *     <li>对其余所有维度做同样的重建（此时玩家已经在新主世界里）</li>
  * </ol>
  *
- * <p>任何一步抛异常时，会先把玩家放回安全位置再抛出，避免把暂存维度里的
- * 高空坐标写进玩家存档。
+ * <p>任何一步失败时，会先把玩家放回安全位置，再返回 {@code false} 由调用方停服，
+ * 避免把暂存维度里的高空坐标写进玩家存档。
  */
 public final class WorldResetter {
 
     private WorldResetter() {
     }
 
-    public static void reset(MinecraftServer server) {
+    /**
+     * 重建所有维度并重置本局状态。
+     *
+     * @return 是否重置成功；失败时调用方应停止服务器
+     */
+    public static boolean reset(MinecraftServer server) {
         Manhunt.LOGGER.info("[Manhunt] 游戏结束，开始生成新世界");
 
         MinecraftServerAccessor serverAccessor = (MinecraftServerAccessor) server;
@@ -84,7 +90,7 @@ public final class WorldResetter {
         if (oldOverworld == null) {
             broadcast(server, "生成新世界失败：找不到主世界");
             Manhunt.LOGGER.error("[Manhunt] 找不到主世界，取消重置");
-            return;
+            return false;
         }
 
         Map<ResourceKey<Level>, LevelStem> stems = new HashMap<>();
@@ -102,11 +108,13 @@ public final class WorldResetter {
         if (overworldStem == null) {
             broadcast(server, "生成新世界失败：找不到主世界的生成参数");
             Manhunt.LOGGER.error("[Manhunt] 找不到主世界 LevelStem，取消重置");
-            return;
+            return false;
         }
 
         ServerLevel holdingLevel = null;
         boolean playersMoved = false;
+        WorldGenSettings oldSettings = server.getWorldGenSettings();
+        boolean overworldRebuilt = false;
 
         try {
             applyNewSeed(server, serverAccessor, newSeed);
@@ -119,8 +127,12 @@ public final class WorldResetter {
 
             int parkingY = parkingY(holdingLevel);
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                player.teleportTo(holdingLevel, 0.5, parkingY, 0.5, Set.of(),
-                        player.getYRot(), player.getXRot(), false);
+                player.closeContainer();
+                if (!player.teleportTo(holdingLevel, 0.5, parkingY, 0.5, Set.of(),
+                        player.getYRot(), player.getXRot(), false)) {
+                    throw new IllegalStateException("无法把玩家 " + player.getScoreboardName()
+                            + " 移到暂存维度");
+                }
                 player.fallDistance = 0.0;
                 player.setDeltaMovement(Vec3.ZERO);
                 playersMoved = true;
@@ -129,6 +141,7 @@ public final class WorldResetter {
             // 5. 重建主世界
             rebuildLevel(server, serverAccessor, oldOverworld, overworldStem,
                     newSeed, server.getWorldData().overworldData(), true);
+            overworldRebuilt = true;
             ServerLevel newOverworld = server.overworld();
             if (newOverworld == null) {
                 throw new IllegalStateException("主世界重建后不存在");
@@ -140,10 +153,13 @@ public final class WorldResetter {
                     LevelData.RespawnData.of(Level.OVERWORLD, spawnPos, 0.0F, 0.0F);
 
             for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                resetPlayer(player);
-                player.teleportTo(newOverworld,
+                if (!player.teleportTo(newOverworld,
                         spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5,
-                        Set.of(), player.getYRot(), player.getXRot(), false);
+                        Set.of(), player.getYRot(), player.getXRot(), false)) {
+                    throw new IllegalStateException("无法把玩家 " + player.getScoreboardName()
+                            + " 送到新主世界");
+                }
+                resetPlayer(player);
                 player.setRespawnPosition(new ServerPlayer.RespawnConfig(respawnData, false), false);
             }
 
@@ -164,12 +180,42 @@ public final class WorldResetter {
                 ServerLevelData levelData = new DerivedLevelData(worldData, worldData.overworldData());
                 rebuildLevel(server, serverAccessor, oldLevel, stem, newSeed, levelData, false);
             }
+
+            // 重建会把主世界挪到 levels 末尾，恢复成主世界优先的顺序
+            moveOverworldFirst(serverAccessor);
+
+            // 8. 清理临时暂存维度
+            closeHoldingQuietly(server, serverAccessor, holdingLevel);
+
+            // 9. 重置整局游戏的状态
+            resetWorldTime(server);
+            server.setWeatherParameters(6000, 0, false, false);
+            GameState.setGameStarted(false, server);
+            TeamManager.clearTeams(server);
+            RunnerTracker.clear();
+            CompassTicker.clearCache();
+            PlayerResetManager.markWorldReset(server);
+
+            broadcast(server, "新世界已生成（所有维度已重置）！使用 /hunters 或 /runners 重新选择队伍");
+            Manhunt.LOGGER.info("[Manhunt] 所有维度已重置，新种子: {}", newSeed);
+            return true;
         } catch (Throwable t) {
             // 失败兜底：先把玩家挪到安全位置，再清理临时维度
             Manhunt.LOGGER.error("[Manhunt] 重置世界失败", t);
+
+            // 主世界还没重建成功时恢复旧种子，避免磁盘上的旧区块和新种子混用
+            if (!overworldRebuilt) {
+                try {
+                    restoreWorldGenSettings(serverAccessor, oldSettings);
+                } catch (Exception e) {
+                    Manhunt.LOGGER.error("[Manhunt] 恢复旧世界种子失败", e);
+                }
+            }
+
             if (playersMoved) {
                 try {
-                    ensureOverworldForRescue(server, serverAccessor, stems, newSeed, t);
+                    ensureOverworldForRescue(server, serverAccessor, stems,
+                            server.getWorldGenSettings().options().seed(), t);
                     rescuePlayers(server, holdingLevel);
                 } catch (Exception e) {
                     Manhunt.LOGGER.error("[Manhunt] 失败兜底本身出错，直接停服", e);
@@ -182,23 +228,53 @@ public final class WorldResetter {
                     Manhunt.LOGGER.warn("[Manhunt] 清理临时维度失败", e);
                 }
             }
-            throw t instanceof RuntimeException re ? re
-                    : new RuntimeException("重置世界失败", t);
+            return false;
+        }
+    }
+
+    /** 玩家错过世界重置后重新上线时，补做个人状态重置并送回新主世界出生点。 */
+    public static void resetMissedPlayer(ServerPlayer player) {
+        MinecraftServer server = player.level().getServer();
+        if (server == null) {
+            return;
         }
 
-        // 8. 清理临时暂存维度
-        closeAndDelete(server, serverAccessor, holdingLevel);
+        // 死亡状态下线的玩家先恢复生命值，避免登录后停在死亡界面
+        if (!player.isAlive()) {
+            player.setHealth(player.getMaxHealth());
+            player.setRemainingFireTicks(0);
+            player.fallDistance = 0.0;
+        }
 
-        // 9. 重置整局游戏的状态
-        resetWorldTime(server);
-        server.setWeatherParameters(6000, 0, false, false);
-        GameState.setGameStarted(false, server);
-        TeamManager.clearTeams(server);
-        RunnerTracker.clear();
-        CompassTicker.clearCache();
+        ServerLevel overworld = server.overworld();
+        if (overworld != null) {
+            BlockPos spawnPos = overworld.getRespawnData().pos();
+            LevelData.RespawnData respawnData =
+                    LevelData.RespawnData.of(Level.OVERWORLD, spawnPos, 0.0F, 0.0F);
+            try {
+                if (!player.teleportTo(overworld,
+                        spawnPos.getX() + 0.5, spawnPos.getY(), spawnPos.getZ() + 0.5,
+                        Set.of(), player.getYRot(), player.getXRot(), false)) {
+                    Manhunt.LOGGER.warn("[Manhunt] 补重置时无法传送玩家 {}",
+                            player.getScoreboardName());
+                }
+            } catch (Exception e) {
+                Manhunt.LOGGER.warn("[Manhunt] 补重置时传送玩家 {} 失败",
+                        player.getScoreboardName(), e);
+            }
 
-        broadcast(server, "新世界已生成（所有维度已重置）！使用 /hunters 或 /runners 重新选择队伍");
-        Manhunt.LOGGER.info("[Manhunt] 所有维度已重置，新种子: {}", newSeed);
+            try {
+                player.setRespawnPosition(new ServerPlayer.RespawnConfig(respawnData, false), false);
+            } catch (Exception e) {
+                Manhunt.LOGGER.warn("[Manhunt] 补重置时设置玩家 {} 重生点失败",
+                        player.getScoreboardName(), e);
+            }
+        }
+
+        resetPlayer(player);
+        player.sendSystemMessage(Component.literal("世界已重置，你的个人状态也已重置"));
+        Manhunt.LOGGER.info("[Manhunt] 已补重置错过世界重置的玩家 {}",
+                player.getScoreboardName());
     }
 
     /** 更新服务器内存和 world_gen_settings.dat 中的种子。 */
@@ -215,6 +291,14 @@ public final class WorldResetter {
 
         accessor.setWorldGenSettings(newSettings);
         accessor.getSavedDataStorage().set(WorldGenSettings.TYPE, newSettings);
+        accessor.getSavedDataStorage().scheduleSave();
+    }
+
+    /** 重置失败时恢复旧种子，避免旧区块与新种子混用。 */
+    private static void restoreWorldGenSettings(MinecraftServerAccessor accessor,
+                                                WorldGenSettings oldSettings) {
+        accessor.setWorldGenSettings(oldSettings);
+        accessor.getSavedDataStorage().set(WorldGenSettings.TYPE, oldSettings);
         accessor.getSavedDataStorage().scheduleSave();
     }
 
@@ -261,6 +345,21 @@ public final class WorldResetter {
         return newLevel;
     }
 
+    /** 把主世界放回 levels 的首位，保持原版“主世界优先”的遍历顺序。 */
+    private static void moveOverworldFirst(MinecraftServerAccessor accessor) {
+        Map<ResourceKey<Level>, ServerLevel> levels = accessor.getLevels();
+        ServerLevel overworld = levels.remove(Level.OVERWORLD);
+        if (overworld == null) {
+            return;
+        }
+
+        Map<ResourceKey<Level>, ServerLevel> reordered = new LinkedHashMap<>();
+        reordered.put(Level.OVERWORLD, overworld);
+        reordered.putAll(levels);
+        levels.clear();
+        levels.putAll(reordered);
+    }
+
     /** 关闭维度并删除它的 region / entities / poi / data。 */
     private static void closeAndDelete(MinecraftServer server,
                                        MinecraftServerAccessor accessor,
@@ -268,7 +367,8 @@ public final class WorldResetter {
         ResourceKey<Level> key = level.dimension();
         accessor.getLevels().remove(key);
 
-        // noSave 避免关闭时又把刚删掉的数据写回去
+        // 注意：ServerChunkCache#close 仍会保存，noSave 只能阻止后续自动保存，
+        // 不能避免关闭时的这次全量写盘。
         level.noSave = true;
         try {
             level.close();
@@ -347,13 +447,17 @@ public final class WorldResetter {
                 target.dimension().identifier(), pos.getX(), pos.getY(), pos.getZ());
 
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            boolean moved;
             try {
-                player.teleportTo(target, pos.getX() + 0.5, pos.getY(),
+                moved = player.teleportTo(target, pos.getX() + 0.5, pos.getY(),
                         pos.getZ() + 0.5, Set.of(),
                         player.getYRot(), player.getXRot(), false);
             } catch (Exception e) {
                 Manhunt.LOGGER.warn("[Manhunt] 传送玩家 {} 失败，改用强制移动",
                         player.getScoreboardName(), e);
+                moved = false;
+            }
+            if (!moved) {
                 forceMove(player, target, pos);
             }
             player.fallDistance = 0.0;
@@ -458,7 +562,7 @@ public final class WorldResetter {
         }
     }
 
-    /** 失败路径清理临时维度；如果还有玩家留在里面就先不关，避免连玩家一起处理掉。 */
+    /** 清理临时维度；如果还有玩家留在里面就先不关，避免连玩家一起处理掉。 */
     private static void closeHoldingQuietly(MinecraftServer server,
                                             MinecraftServerAccessor accessor,
                                             ServerLevel holdingLevel) {
@@ -507,7 +611,6 @@ public final class WorldResetter {
                 LevelData.RespawnData.of(Level.OVERWORLD, spawnPos, 0.0F, 0.0F);
 
         ServerLevelData overworldData = server.getWorldData().overworldData();
-        overworldData.setSpawn(respawnData);
         overworldData.setInitialized(true);
         server.setRespawnData(respawnData);
 
@@ -515,7 +618,9 @@ public final class WorldResetter {
     }
 
     private static void resetPlayer(ServerPlayer player) {
+        player.closeContainer();
         player.getInventory().clearContent();
+        player.getEnderChestInventory().clearContent();
         player.removeAllEffects();
 
         player.setHealth(player.getMaxHealth());

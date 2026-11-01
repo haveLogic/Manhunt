@@ -3,13 +3,13 @@
 	"id": "manhunt",
 	"version": "${version}",
 	"name": "Manhunt",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "Manhunt 小游戏：猎人追捕跑者，跑者全部死亡或掉线超时后自动重建世界。",
 	"authors": [
-		"Me!"
+		"islogic"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://github.com/haveLogic/Manhunt",
+		"sources": "https://github.com/haveLogic/Manhunt"
 	},
 	"license": "GPL-3.0-only",
 	"icon": "assets/manhunt/icon.png",
@@ -23,11 +23,7 @@
 		]
 	},
 	"mixins": [
-		"manhunt.mixins.json",
-		{
-			"config": "manhunt.client.mixins.json",
-			"environment": "client"
-		}
+		"manhunt.mixins.json"
 	],
 	"depends": {
 		"fabricloader": ">=0.19.5",

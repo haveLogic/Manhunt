@@ -22,20 +22,15 @@ public class Manhunt implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
-		// This code runs as soon as Minecraft is in a mod-load-ready state.
-		// However, some things (like resources) may still be uninitialized.
-		// Proceed with mild caution.
-
-		LOGGER.info("Hello Fabric world!");
+		LOGGER.info("[Manhunt] 初始化");
 
 		gameManager = new GameManager();
 
-		// 监听服务器启动完成事件
-        // 服务器完全启动后，调用创建队伍的方法
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			TeamManager.createTeams(server);
 			GameState.initOnServerStart(server);
 			gameManager.reset();
+			PlayerResetManager.load(server);
 		});
 		Commands.register();
 		PlayerJoinHandler.register();

@@ -88,6 +88,19 @@ public class TeamManager {
         return runners;
     }
 
+    /** 把指定玩家移出指定队伍；队伍不存在时静默返回。 */
+    public static void removeFromTeam(MinecraftServer server, String teamName, String playerName) {
+        Scoreboard scoreboard = server.getScoreboard();
+        for (PlayerTeam team : scoreboard.getPlayerTeams()) {
+            if (teamName.equals(team.getName())) {
+                if (team.getPlayers().contains(playerName)) {
+                    scoreboard.removePlayerFromTeam(playerName, team);
+                }
+                return;
+            }
+        }
+    }
+
     /**
      * 清空 hunters / runners 两个队伍的成员（队伍本身保留）。
      * 用于新世界生成后让所有人重新选择身份。

@@ -7,6 +7,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.food.FoodData;
 
 import java.util.List;
+import java.util.UUID;
 
 public class GameManager implements ServerTickEvents.EndTick {
 
@@ -54,15 +55,26 @@ public class GameManager implements ServerTickEvents.EndTick {
         }
     }
 
-    /** 游戏进行中：只关心开局时的 runner 是否全部阵亡 */
+    /** 游戏进行中：只关心开局时的 runner 是否全部阵亡/淘汰 */
     private void onRunning(MinecraftServer server) {
-        RunnerTracker.refresh(server);
+        for (RunnerTracker.Elimination elimination : RunnerTracker.refresh(server)) {
+            UUID id = elimination.id();
+            String name = RunnerTracker.nameOf(id);
+            TeamManager.removeFromTeam(server, "runners", name);
+            CompassTicker.clearRunner(id);
+            String reason = elimination.timedOut()
+                    ? "掉线超时，视为淘汰"
+                    : "已死亡，离开 runners 队伍";
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.literal("跑 " + name + " " + reason), false);
+        }
+
         if (RunnerTracker.isGameOver()) {
             phase = Phase.COUNTDOWN;
             countdownStartTick = tickCounter;
             lastBroadcastSecond = -1;
             server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("所有 runner 已死亡，服务器将在 "
+                    Component.literal("所有 runner 已淘汰，服务器将在 "
                             + RESET_DELAY_SECONDS + " 秒后生成新世界"), false);
         }
     }
@@ -85,7 +97,12 @@ public class GameManager implements ServerTickEvents.EndTick {
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("正在生成新世界，请稍候..."), false);
             try {
-                WorldResetter.reset(server);
+                if (!WorldResetter.reset(server)) {
+                    server.getPlayerList().broadcastSystemMessage(
+                            Component.literal("生成新世界失败，服务器将关闭"), false);
+                    server.halt(false);
+                    return;
+                }
                 phase = Phase.WAITING;
                 lastBroadcastSecond = -1;
             } catch (Throwable t) {

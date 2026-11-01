@@ -11,10 +11,9 @@ public class GameState {
     }
 
     public static void setGameStarted(boolean started, MinecraftServer server) {
-        if (gameStarted == started) return;
         gameStarted = started;
 
-        // 直接使用 get().set() 设置规则值
+        // 不因 gameStarted 未变化而跳过，确保规则值始终与状态一致
         server.getGameRules().set(GameRules.ADVANCE_TIME, started, server);
     }
 

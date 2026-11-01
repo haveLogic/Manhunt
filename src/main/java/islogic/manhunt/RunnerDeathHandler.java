@@ -18,6 +18,7 @@ public class RunnerDeathHandler {
 
             // 只登记死亡，不看队伍是否为空，避免掉线被误判为阵亡
             RunnerTracker.markDead(player);
+            CompassTicker.clearRunner(player.getUUID());
 
             Scoreboard scoreboard = server.getScoreboard();
             String name = player.getScoreboardName();
