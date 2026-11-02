@@ -1,6 +1,6 @@
 # Manhunt 待修清单
 
-> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-01。按修复优先级排序，修完一条把状态改成 `已修`。
+> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-02。按修复优先级排序，修完一条把状态改成 `已修`。
 > 行号对应记录时的代码，改动后可能偏移。
 
 ## P0 — 必须修
@@ -23,6 +23,26 @@
   - 注意：用 `/kill` 杀 **Carpet 假人**不会触发死亡事件 —— Carpet 重写了 `kill(ServerLevel)`，
     直接把假人断线，不走 `LivingEntity#die`。真实玩家 `/kill` 或任何伤害死亡都正常。
     假人测试请用 `/damage <名> 1000 minecraft:generic_kill`。
+
+- [x] **死亡玩家重置时没有真正复活，客户端卡死** — 已修（2026-11-02）
+  `WorldResetter.respawnDeadPlayers` 直接调用 `PlayerList#respawn`，绕过了
+  `ServerGamePacketListenerImpl#handleClientCommand` 里的
+  `restartClientLoadTimerAfterRespawn()`，`waitingForRespawn` 一直为 true：
+  服务端会忽略该玩家的移动包、让其无法受伤，客户端表现为卡死。
+  - 落地：改为向玩家连接投递 `ServerboundClientCommandPacket(PERFORM_RESPAWN)`，
+    走原版“点击重生”同一条流程；没有连接的测试假人仍走 `PlayerList#respawn`。
+  - 涉及：`WorldResetter.java:429-445`
+
+- [x] **重置世界时新区块生成崩溃（`ConcurrentModificationException`）** — 已修（2026-11-02）
+  重置时旧维度的区块生成任务还没结束（`ChunkMap#close` 只把调度器标记为关闭，
+  不会等待正在执行的任务），新维度紧接着开始生成；同一个结构模板被多个线程同时
+  调用 `StructureTemplate$Palette#blocks(Block)`，而它的缓存是普通 `HashMap`，
+  `computeIfAbsent` 并发修改直接抛 `ConcurrentModificationException`，客户端崩溃。
+  - 落地：新增 `StructureTemplatePaletteMixin`，在 `Palette` 构造完成后把 `cache`
+    换成 `ConcurrentHashMap`，保留原版“同一个 key 只计算一次”的语义。
+  - 涉及：`StructureTemplatePaletteMixin.java`、`manhunt.mixins.json`
+  - 验证（专用服务器 + Carpet 假人）：runner 死亡后等待 30 秒重置，
+    日志出现「所有维度已重置」，无 `ConcurrentModificationException`。
 
 ## P1 — 强烈建议
 
@@ -100,7 +120,8 @@
 ## 已确认正常
 
 新种子落盘、三/自定义维度重建参数、末地龙重新初始化、出生点安全、
-指南针组件自动同步、`END_SERVER_TICK` 阶段替换 `levels` 无并发问题。
+指南针组件自动同步、`END_SERVER_TICK` 阶段替换 `levels` 无并发问题
+（结构模板缓存另见上方 2026-11-02 的 `ConcurrentModificationException` 条目）。
 
 ## 补充说明
 

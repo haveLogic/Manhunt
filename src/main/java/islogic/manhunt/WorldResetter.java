@@ -6,6 +6,7 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
@@ -13,6 +14,7 @@ import net.minecraft.server.level.PlayerSpawnFinder;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.clock.ClockTimeMarkers;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.clock.WorldClocks;
@@ -414,12 +416,31 @@ public final class WorldResetter {
         );
     }
 
-    /** 死亡玩家还停留在死亡界面，直接传送会导致状态异常，先走原版重生流程。 */
+    /**
+     * 死亡玩家还停留在死亡界面，直接传送会导致状态异常，先走原版重生流程。
+     *
+     * <p>不能直接调用 {@code PlayerList#respawn}：那条路径只负责换一个
+     * {@link ServerPlayer} 并发送重生包，不会清掉
+     * {@code ServerGamePacketListenerImpl#waitingForRespawn}。玩家会一直被视为
+     * “等待重生”，之后的移动包全部被忽略、也无法受伤，表现为卡死。
+     * 这里模拟客户端点击“重生”时发出的同一个包，让原版完整走一遍
+     * 复活 + 重置客户端加载计时。
+     */
     private static void respawnDeadPlayers(MinecraftServer server) {
         for (ServerPlayer player : List.copyOf(server.getPlayerList().getPlayers())) {
-            if (!player.isAlive()) {
-                server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
+            if (player.isAlive()) {
+                continue;
             }
+
+            ServerGamePacketListenerImpl connection = player.connection;
+            if (connection == null) {
+                // 没有真实连接（例如测试假人）时不会卡在死亡界面，直接走原版重生
+                server.getPlayerList().respawn(player, false, Entity.RemovalReason.KILLED);
+                continue;
+            }
+
+            connection.handleClientCommand(new ServerboundClientCommandPacket(
+                    ServerboundClientCommandPacket.Action.PERFORM_RESPAWN));
         }
     }
 
