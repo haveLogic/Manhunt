@@ -1,11 +1,14 @@
 package islogic.manhunt;
 
 import islogic.manhunt.mixin.MinecraftServerAccessor;
+import islogic.manhunt.mixin.StatsCounterAccessor;
+import it.unimi.dsi.fastutil.objects.Object2IntMap;
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.game.ClientboundAwardStatsPacket;
 import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -15,9 +18,9 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
-import net.minecraft.world.clock.ClockTimeMarkers;
+import net.minecraft.stats.ServerStatsCounter;
+import net.minecraft.stats.Stat;
 import net.minecraft.world.clock.WorldClock;
-import net.minecraft.world.clock.WorldClocks;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Relative;
 import net.minecraft.world.entity.ai.village.VillageSiege;
@@ -36,6 +39,7 @@ import net.minecraft.world.level.levelgen.WorldGenSettings;
 import net.minecraft.world.level.levelgen.WorldOptions;
 import net.minecraft.world.level.storage.DerivedLevelData;
 import net.minecraft.world.level.storage.LevelData;
+import net.minecraft.world.level.storage.LevelResource;
 import net.minecraft.world.level.storage.ServerLevelData;
 import net.minecraft.world.level.storage.WorldData;
 import net.minecraft.world.phys.Vec3;
@@ -49,6 +53,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
@@ -196,6 +201,7 @@ public final class WorldResetter {
             TeamManager.clearTeams(server);
             RunnerTracker.clear();
             CompassTicker.clearCache();
+            resetAdvancements(server);
             PlayerResetManager.markWorldReset(server);
 
             broadcast(server, "新世界已生成（所有维度已重置）！使用 /hunters 或 /runners 重新选择队伍");
@@ -641,27 +647,106 @@ public final class WorldResetter {
     private static void resetPlayer(ServerPlayer player) {
         player.closeContainer();
         player.getInventory().clearContent();
+        player.getInventory().setSelectedSlot(0);
         player.getEnderChestInventory().clearContent();
         player.removeAllEffects();
+        player.clearFire();
+        player.setRemainingFireTicks(0);
+        player.setTicksFrozen(0);
+        player.setArrowCount(0);
+        player.setAbsorptionAmount(0.0F);
+        player.setPortalCooldown(0);
+        player.setScore(0);
+        player.setLastDeathLocation(Optional.empty());
+        player.setShoulderParrotLeft(Optional.empty());
+        player.setShoulderParrotRight(Optional.empty());
+        player.seenCredits = false;
 
         player.setHealth(player.getMaxHealth());
         player.getFoodData().setFoodLevel(20);
         player.getFoodData().setSaturation(5.0F);
 
+        player.totalExperience = 0;
+        player.experienceProgress = 0.0F;
         player.setExperienceLevels(0);
         player.setExperiencePoints(0);
 
-        player.setRemainingFireTicks(0);
+        resetRecipes(player);
+        resetStatistics(player);
+
         player.fallDistance = 0.0;
         player.setDeltaMovement(Vec3.ZERO);
     }
 
-    /** 把新世界的时间拨回白天（时间是否流逝由 ADVANCE_TIME 规则控制）。 */
+    /** 清空玩家的配方书（已解锁配方存在玩家数据里，不在维度目录里）。 */
+    private static void resetRecipes(ServerPlayer player) {
+        MinecraftServer server = player.level().getServer();
+        if (server == null) {
+            return;
+        }
+        try {
+            // getRecipes() 包含所有配方，确保配方书里的每一项都能被移除
+            player.resetRecipes(server.getRecipeManager().getRecipes());
+        } catch (Exception e) {
+            Manhunt.LOGGER.warn("[Manhunt] 重置玩家 {} 的配方失败",
+                    player.getScoreboardName(), e);
+        }
+    }
+
+    /**
+     * 清空统计数据。统计单独保存在 {@code world/players/stats} 里，
+     * 内存中的计数器也要一并清空，并把 0 值同步给客户端，刷新统计界面。
+     */
+    private static void resetStatistics(ServerPlayer player) {
+        ServerStatsCounter stats = player.getStats();
+        Object2IntMap<Stat<?>> values = ((StatsCounterAccessor) stats).getRawStats();
+
+        if (!values.isEmpty()) {
+            // 客户端收到全 0 的统计包后会把对应的旧数据覆盖掉
+            Object2IntMap<Stat<?>> zeros = new Object2IntOpenHashMap<>();
+            for (Stat<?> stat : values.keySet()) {
+                zeros.put(stat, 0);
+            }
+            values.clear();
+            if (player.connection != null) {
+                player.connection.send(new ClientboundAwardStatsPacket(zeros));
+            }
+        }
+
+        // 立即把清空后的统计写回文件，避免下线前崩溃又读回旧数据
+        stats.save();
+    }
+
+    /**
+     * 成就（advancements）存在 {@code world/players/advancements} 下，不在维度目录里，
+     * 只重置维度不会清掉。这里删除所有玩家的成就文件，并让在线玩家重新加载，
+     * 使内存中的进度和客户端成就界面一起清空。
+     */
+    private static void resetAdvancements(MinecraftServer server) {
+        Path directory = server.getWorldPath(LevelResource.PLAYER_ADVANCEMENTS_DIR);
+        try {
+            deleteContents(directory);
+        } catch (IOException e) {
+            Manhunt.LOGGER.warn("[Manhunt] 清理成就数据失败", e);
+        }
+
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            try {
+                // 文件已删除，reload 会清空进度并从空文件重新加载
+                player.getAdvancements().reload(server.getAdvancements());
+            } catch (Exception e) {
+                Manhunt.LOGGER.warn("[Manhunt] 重置玩家 {} 的成就失败",
+                        player.getScoreboardName(), e);
+            }
+        }
+    }
+
+    /** 把新世界的时间拨回 0（时间是否流逝由 ADVANCE_TIME 规则控制）。 */
     private static void resetWorldTime(MinecraftServer server) {
         try {
             Registry<WorldClock> clocks = server.registryAccess().lookupOrThrow(Registries.WORLD_CLOCK);
-            Holder<WorldClock> overworldClock = clocks.getOrThrow(WorldClocks.OVERWORLD);
-            server.clockManager().moveToTimeMarker(overworldClock, ClockTimeMarkers.DAY);
+            clocks.listElements().forEach(clock ->
+                    server.clockManager().setTotalTicks(clock, 0L));
         } catch (Exception e) {
             Manhunt.LOGGER.warn("[Manhunt] 重置时间失败", e);
         }

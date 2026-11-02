@@ -8,6 +8,7 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.CustomData;
@@ -25,7 +26,7 @@ import java.util.UUID;
 import static islogic.manhunt.TeamManager.getRunners;
 
 public class CompassTicker implements ServerTickEvents.EndTick {
-    private static final int UPDATE_INTERVAL = 5; // 每 5 tick 更新一次，减轻负担
+    private static final int UPDATE_INTERVAL = 10; // 每 10 tick 更新一次，减轻负担
     private static final String TRACKER_TAG = "manhunt_tracker";
 
     private int tickCounter = 0;
@@ -98,12 +99,22 @@ public class CompassTicker implements ServerTickEvents.EndTick {
 
     private void updateCompassFor(ServerPlayer holder, Set<UUID> targets,
                                   Map<UUID, ServerPlayer> onlineRunners) {
-        ItemStack stack = holder.getMainHandItem();
-        if (!isTrackerCompass(stack)) {
-            stack = holder.getOffhandItem();
-            if (!isTrackerCompass(stack)) return;
-        }
+        Vec3 targetPos = findNearestTarget(holder, targets, onlineRunners);
 
+        // 指南针可能只放在快捷栏里而没有选中（选中格子为空时也算），
+        // 所以不能只看主手/副手，否则指南针在背包里会一直乱转。
+        Inventory inventory = holder.getInventory();
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (isTrackerCompass(stack)) {
+                applyTarget(stack, holder.level(), targetPos);
+            }
+        }
+    }
+
+    /** 找出离 holder 最近的 runner 位置（同维度用实时位置，否则用最后记录的位置）。 */
+    private Vec3 findNearestTarget(ServerPlayer holder, Set<UUID> targets,
+                                   Map<UUID, ServerPlayer> onlineRunners) {
         Vec3 targetPos = null;
         double nearestDist = Double.MAX_VALUE;
 
@@ -126,12 +137,15 @@ public class CompassTicker implements ServerTickEvents.EndTick {
                 targetPos = pos;
             }
         }
+        return targetPos;
+    }
 
+    private void applyTarget(ItemStack stack, ServerLevel dimension, Vec3 targetPos) {
         if (targetPos == null) {
             stack.set(DataComponents.LODESTONE_TRACKER,
                     new LodestoneTracker(Optional.empty(), false));
         } else {
-            setCompassTarget(stack, holder.level(), targetPos);
+            setCompassTarget(stack, dimension, targetPos);
         }
     }
 

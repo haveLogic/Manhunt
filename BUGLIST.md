@@ -90,6 +90,45 @@
   - 落地：`reset()` 记录旧 `WorldGenSettings`，主世界重建成功前失败则恢复旧种子；
     救援主世界使用恢复后的当前种子。
   - 涉及：`WorldResetter.java:116-117`、`WorldResetter.java:207-214`、`WorldResetter.java:298-303`
+- [x] **重置世界后成就没有重置** — 已修（2026-11-02）
+  成就数据保存在 `world/players/advancements/<uuid>.json`，不在维度目录里，
+  `WorldResetter` 只删除维度数据，成就因此一直保留。
+  - 落地：重置时删除成就目录下所有文件；在线玩家再调用
+    `PlayerAdvancements#reload`，让内存进度和客户端成就界面一起清空。
+    离线玩家下次上线会直接从空文件加载。
+  - 涉及：`WorldResetter.java:725-743`
+  - 验证（专用服务器 + Carpet 假人）：重置前给假人授予 `minecraft:story/mine_stone`，
+    重置后成就文件中不再包含该成就。
+
+- [x] **重置世界后时间没有归零** — 已修（2026-11-02）
+  `resetWorldTime` 原来调用 `moveToTimeMarker(..., Day)`，新世界从早上开始而不是 0。
+  - 落地：遍历 `WORLD_CLOCK` 注册表里的所有时钟，调用
+    `ServerClockManager#setTotalTicks(clock, 0L)` 统一归零；该方法会同步客户端
+    并刷新环境属性缓存。
+  - 涉及：`WorldResetter.java:745-753`
+
+- [x] **重置世界后玩家配方和统计数据残留** — 已修（2026-11-02）
+  配方书保存在玩家 `.dat`，统计保存在 `world/players/stats/<uuid>.json`，
+  只清背包/末影箱不会重置。另外经验总值、已选快捷栏、传送冷却、死亡点和
+  肩上的鹦鹉也属于玩家个人数据。
+  - 落地：`resetPlayer` 现在统一重置
+    - 配方：`ServerPlayer#resetRecipes(RecipeManager#getRecipes())`
+    - 统计：新增 `StatsCounterAccessor` 清空内存统计，向客户端发送全 0 的
+      `ClientboundAwardStatsPacket`，并立即 `save()` 写回文件
+    - 经验总值 / 进度、快捷栏选中项、传送冷却、分数、死亡点、肩上的鹦鹉、片尾观看标记
+  - 离线玩家仍通过 `PlayerResetManager` 的补重置路径调用同一个 `resetPlayer`。
+  - 涉及：`WorldResetter.java:647-723`、`StatsCounterAccessor.java`、`manhunt.mixins.json`
+
+- [x] **指南针放在快捷栏但未选中时不更新，看起来像“改间隔后失效”** — 已修（2026-11-02）
+  `CompassTicker.updateCompassFor` 之前只处理主手/副手；而 `/hunters` 把指南针放进第一个空格，
+  不一定会选中它。此时服务端永远不会给这枚指南针写入 `LODESTONE_TRACKER`，
+  客户端只能显示“无目标乱转”，和更新间隔（5 tick / 10 tick）无关。
+  - 落地：先算出离该玩家最近的 runner 目标，再遍历整个玩家背包
+    （快捷栏、主背包、护甲、副手）里所有带 `manhunt_tracker` 标记的指南针，统一写入目标。
+  - 涉及：`CompassTicker.java:99-160`
+  - 验证（专用服务器 + Carpet 假人，`UPDATE_INTERVAL = 10`）：
+    指南针放在 `hotbar.5`、选中格为 0，runner 传送到 (210,100,210) 后存盘，
+    玩家 `.dat` 中的指南针带有 `minecraft:lodestone_tracker`，目标为 runner 的实时位置。
 
 ## P3 — 清理
 
@@ -120,7 +159,8 @@
 ## 已确认正常
 
 新种子落盘、三/自定义维度重建参数、末地龙重新初始化、出生点安全、
-指南针组件自动同步、`END_SERVER_TICK` 阶段替换 `levels` 无并发问题
+指南针组件通过容器菜单自动同步（只有被 `CompassTicker` 写入过的格子才会变，见上方条目）、
+`END_SERVER_TICK` 阶段替换 `levels` 无并发问题
 （结构模板缓存另见上方 2026-11-02 的 `ConcurrentModificationException` 条目）。
 
 ## 补充说明
