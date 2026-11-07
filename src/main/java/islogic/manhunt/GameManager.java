@@ -1,9 +1,11 @@
 package islogic.manhunt;
 
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.players.NameAndId;
 import net.minecraft.world.food.FoodData;
 
 import java.util.List;
@@ -51,6 +53,7 @@ public class GameManager implements ServerTickEvents.EndTick {
             GameState.setGameStarted(true, server);
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("游戏开始！"), false);
+            notifyExemptPlayers(server);
             phase = Phase.RUNNING;
         }
     }
@@ -148,12 +151,37 @@ public class GameManager implements ServerTickEvents.EndTick {
         }
     }
 
+    /**
+     * 除被豁免的管理员外，所有在线玩家都必须已经选好队伍。
+     *
+     * <p>管理员豁免：否则一个挂机、旁观或不打算参与的管理员就会让整局永远开不了，
+     * 而且没有任何提示能看出卡在谁身上。
+     */
     private static boolean allPlayersHaveTeam(MinecraftServer server) {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            if (player.getTeam() == null) {
+            if (player.getTeam() == null && !isTeamExempt(server, player)) {
                 return false;
             }
         }
         return true;
+    }
+
+    /** 未选队的管理员不参与开局判定。 */
+    private static boolean isTeamExempt(MinecraftServer server, ServerPlayer player) {
+        return server.getPlayerList().isOp(
+                new NameAndId(player.getUUID(), player.getScoreboardName()));
+    }
+
+    /** 开局时告诉被豁免的管理员：他们不在本局里。 */
+    private static void notifyExemptPlayers(MinecraftServer server) {
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            // 能走到这里的无队伍玩家只可能是被豁免的管理员
+            if (player.getTeam() != null) {
+                continue;
+            }
+            player.sendSystemMessage(
+                    Component.literal("你不在任何队伍中，本局不参与（管理员豁免）")
+                            .withStyle(ChatFormatting.GRAY));
+        }
     }
 }

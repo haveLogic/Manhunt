@@ -1,6 +1,6 @@
 # Manhunt 待修清单
 
-> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-02。按修复优先级排序，修完一条把状态改成 `已修`。
+> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-07。按修复优先级排序，修完一条把状态改成 `已修`。
 > 行号对应记录时的代码，改动后可能偏移。
 
 ## P0 — 必须修
@@ -66,6 +66,15 @@
     「已为主世界重建空维度」「把玩家安置到 minecraft:overworld」；
     停服后 `players/data/*.dat` 为 `Dimension=minecraft:overworld`、
     位置在出生点（不再是 `manhunt:reset_holding` + y=200），临时维度目录已清空。
+
+- [x] **管理员没选队导致整局无法开始** — 已修（2026-11-07）
+  `GameManager.allPlayersHaveTeam` 要求所有在线玩家都在队伍里；任何挂机、旁观或不打算
+  参与的管理员都会让开局条件永远不成立，且没有任何提示能看出卡在谁身上。
+  - 落地：新增 `isTeamExempt()`，OP（`PlayerList#isOp(NameAndId)`）没选队也不阻塞开局；
+    开局时给这类管理员单独发一条「本局不参与」提示。
+  - 涉及：`GameManager.java` 的 `allPlayersHaveTeam` / `notifyExemptPlayers`
+  - 注意：被豁免的管理员仍以普通身份留在世界里，能攻击 runner；需要更严格时在
+    `notifyExemptPlayers` 里改成切旁观模式。
 
 ## P2 — 中危，改动量小
 
