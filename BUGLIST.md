@@ -16,10 +16,11 @@
     `GameManager.onRunning` 改看 `isGameOver()`（并加 `refresh()` 轮询兜底：在线但已不活着的
     开局 runner 也记为阵亡），`GameManager.reset()` 与 `WorldResetter.reset()` 均清空记录；
     `onCountdown` 增加「记录被清空则取消倒计时」兜底。
-  - 掉线规则（2026-10-31）：掉线 60 秒后视为淘汰，移出 runners 队伍并播报；
-    重新上线会取消计时。阈值见 `RunnerTracker.DISCONNECT_TIMEOUT_SECONDS`。
-  - 验证（专用服务器 + Carpet 假人）：踢人 20 秒不倒计时、61 秒淘汰；真实伤害死亡 →
-    倒计时 → 世界重建成功。
+  - 掉线规则（2026-10-31，2026-11-07 阈值改为 3 分钟）：掉线 3 分钟（180 秒）后视为淘汰，
+    移出 runners 队伍并播报；3 分钟内重新上线会取消计时。阈值见
+    `RunnerTracker.DISCONNECT_TIMEOUT_SECONDS`。
+  - 验证（专用服务器 + Carpet 假人，当时阈值 60 秒）：踢人 20 秒不倒计时、61 秒淘汰；
+    真实伤害死亡 → 倒计时 → 世界重建成功。（2026-11-07 阈值改为 180 秒，需按新阈值复测。）
   - 注意：用 `/kill` 杀 **Carpet 假人**不会触发死亡事件 —— Carpet 重写了 `kill(ServerLevel)`，
     直接把假人断线，不走 `LivingEntity#die`。真实玩家 `/kill` 或任何伤害死亡都正常。
     假人测试请用 `/damage <名> 1000 minecraft:generic_kill`。
@@ -164,6 +165,23 @@
   `resetMissedPlayer()` 先恢复生命值、灭火并清零摔落距离，再传送和重置。
 - [x] **游戏中加入的欢迎语提示了会被拒绝的命令** — 已修（2026-11-01）
   `PlayerJoinHandler` 按 `GameState` 显示“游戏进行中”或选队提示。
+
+- [x] **掉线淘汰阈值改为 3 分钟，并说明超时不可撤销** — 已修（2026-11-07）
+  审查项 P3-13：README 写「掉线超过 60 秒视为淘汰；期间重新上线则继续游戏」，
+  但超时一旦写入 `deadRunners` 就无法撤销，倒计时期间重新上线也不会中止重置。
+  - 落地：`DISCONNECT_TIMEOUT_SECONDS` 由 `60` 改为 `180`（3 分钟 / 3600 tick）；
+    README 阈值与措辞同步，并补「超时淘汰不可撤销」说明。
+  - 涉及：`RunnerTracker.java:25`、`README.md:17`、`BUGLIST.md`
+
+## 行为调整
+
+- **游戏进行中允许无队伍玩家加入猎人**（2026-11-08）
+  原本开局后所有队伍变更都被拒绝，中途进服的玩家只能等到下一局。
+  - 现在：游戏中无队伍玩家执行 `/hunters` 可中途加入并领取指南针，全服播报；
+    `/runners` 和「已在本局队伍里换队」仍然拒绝。
+  - 跑者不受影响：仍在 runners 队伍里的玩家转不了猎人，`RunnerTracker` 的开局快照
+    与胜负判定不变。
+  - 涉及：`Commands.java`、`PlayerJoinHandler.java`、`README.md`
 
 ## 已确认正常
 

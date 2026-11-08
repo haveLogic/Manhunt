@@ -16,8 +16,12 @@ public class PlayerJoinHandler {
             );
             if (GameState.isGameStarted()) {
                 player.sendSystemMessage(
-                        Component.literal("游戏正在进行中，请等待本局结束")
+                        Component.literal("游戏正在进行中，可执行 /hunters 中途加入猎人队伍")
                                 .withStyle(ChatFormatting.YELLOW)
+                );
+                player.sendSystemMessage(
+                        Component.literal("本局不能加入跑者或更换队伍")
+                                .withStyle(ChatFormatting.GRAY)
                 );
             } else {
                 player.sendSystemMessage(

@@ -44,13 +44,22 @@ public class Commands {
         Scoreboard scoreboard = server.getScoreboard();
 
         PlayerTeam currentTeam = scoreboard.getPlayersTeam(player.getScoreboardName());
+        boolean midGameJoin = false;
         if (GameState.isGameStarted()) {
             if (currentTeam != null && teamName.equals(currentTeam.getName())) {
                 source.sendSuccess(() -> Component.literal("你已经是 " + teamName + " 队伍成员"), false);
                 return 1;
             }
-            source.sendFailure(Component.literal("游戏进行中，不能更换队伍"));
-            return 0;
+            // 游戏进行中只放开「无队伍玩家加入猎人」；
+            // 仍在 runners 队伍里的玩家不能转队，否则 RunnerTracker 的开局快照会让本局无法结束。
+            if (currentTeam == null && "hunters".equals(teamName)) {
+                midGameJoin = true;
+            } else {
+                source.sendFailure(Component.literal(currentTeam == null
+                        ? "游戏进行中，不能加入跑者队伍"
+                        : "游戏进行中，不能更换队伍"));
+                return 0;
+            }
         }
 
         // 按队伍名查找，不能调用 getPlayerTeam(teamName)（它的参数是玩家名）
@@ -66,6 +75,13 @@ public class Commands {
         }
 
         scoreboard.addPlayerToTeam(player.getScoreboardName(), team);
+        if (midGameJoin) {
+            // 播报已经通知到本人，不再重复 sendSuccess
+            server.getPlayerList().broadcastSystemMessage(
+                    Component.literal("猎 " + player.getScoreboardName() + " 中途加入猎人队伍"),
+                    false);
+            return 1;
+        }
         source.sendSuccess(() -> Component.literal("已加入 " + teamName + " 队伍"), false);
         return 1;
     }

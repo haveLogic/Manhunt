@@ -21,8 +21,8 @@ import java.util.UUID;
  */
 public final class RunnerTracker {
 
-    /** 掉线多久后视为淘汰。 */
-    private static final int DISCONNECT_TIMEOUT_SECONDS = 60;
+    /** 掉线多久后视为淘汰（3 分钟）。 */
+    private static final int DISCONNECT_TIMEOUT_SECONDS = 180;
     private static final int DISCONNECT_TIMEOUT_TICKS = DISCONNECT_TIMEOUT_SECONDS * 20;
 
     // 开局时在场的 runner
