@@ -75,6 +75,10 @@ public class Commands {
         }
 
         scoreboard.addPlayerToTeam(player.getScoreboardName(), team);
+        if ("hunters".equals(teamName)) {
+            // 转成猎人后不再是追踪目标；清掉当跑者时缓存的最后位置，避免指南针指向幽灵目标
+            CompassTicker.clearRunner(player.getScoreboardName());
+        }
         if (midGameJoin) {
             // 播报已经通知到本人，不再重复 sendSuccess
             server.getPlayerList().broadcastSystemMessage(

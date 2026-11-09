@@ -1,6 +1,6 @@
 # Manhunt 待修清单
 
-> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-07。按修复优先级排序，修完一条把状态改成 `已修`。
+> 整理于 2026-10-28，落盘于 2026-10-29，最后更新于 2026-11-09。按修复优先级排序，修完一条把状态改成 `已修`。
 > 行号对应记录时的代码，改动后可能偏移。
 
 ## P0 — 必须修
@@ -76,6 +76,33 @@
   - 涉及：`GameManager.java` 的 `allPlayersHaveTeam` / `notifyExemptPlayers`
   - 注意：被豁免的管理员仍以普通身份留在世界里，能攻击 runner；需要更严格时在
     `notifyExemptPlayers` 里改成切旁观模式。
+
+- [x] **指南针一直指向已离队跑者的「幽灵位置」** — 已修（2026-11-09）
+  三个原因叠加，前两次只修到一部分：
+  1. `lastKnownPositions` 只在死亡/超时/重置时清理。玩家换到 hunters 后（无论走
+     `/hunters` 还是 `/team`）会一直留在缓存里，成为一个不再更新的目标；
+  2. `onEndTick` 里 `if (!targets.isEmpty())` 才写入指南针。目标集为空时指南针
+     **不再被写入**，会保留最后一次写入的旧坐标，看起来永远指着幽灵；
+  3. 缓存按 UUID 存、队伍按名字存，导致没法直接用队伍成员校验缓存。
+  - 落地：
+    - 缓存改为按**玩家名**存（`Map<String, ...>`），与计分板队伍成员口径一致；
+    - 每轮先用 `TeamManager.getRunnerNames(server)`（含离线成员）`retainAll` 掉
+      已不在 runners 队伍里的缓存，`/team` 手动改队也能覆盖，并在数量变化时打日志；
+    - 去掉空集守卫，目标为空也走 `applyTarget(null)` 清空 `LODESTONE_TRACKER`；
+    - 死亡/淘汰/`/hunters` 换队仍调用 `clearRunner` 做即时清理，缩短生效延迟。
+  - 性能：每 10 tick 一次 `retainAll` + 构造一次队伍成员名集合，规模都是“本局跑者数”，
+    可忽略；目标为空时不做任何距离计算，只做背包扫描。
+  - 涉及：`CompassTicker.java`、`TeamManager.java`、`Commands.java`、
+    `GameManager.java`、`RunnerDeathHandler.java`
+  - 验证（2026-11-09，假人）：`/team join runners Stev` → `/team join hunters Stev`，
+    日志出现「指南针缓存清理：1 -> 0 个跑者」，指南针在 10 tick 内回到乱转状态。
+
+- [ ] **旁观/创造模式的跑者无法被淘汰，可能锁死一局** — 已暂缓（2026-11-08）
+  `resetPlayer` 不重置游戏模式；旁观/创造跑者不会死，`RunnerTracker.isGameOver()`
+  永远为 false，本局无法结束。
+  - 曾实现「开局时把 hunters/runners 成员强制回生存」（`setGameMode` 在模式相同时不发包，
+    只在开局跑一次），按要求于 2026-11-08 撤销，暂不改动游戏模式。
+  - 现状：需要管理员在开局前手动把参赛者切回生存模式。
 
 ## P2 — 中危，改动量小
 
@@ -182,6 +209,13 @@
   - 跑者不受影响：仍在 runners 队伍里的玩家转不了猎人，`RunnerTracker` 的开局快照
     与胜负判定不变。
   - 涉及：`Commands.java`、`PlayerJoinHandler.java`、`README.md`
+
+- **重置倒计时改为 Boss 栏显示**（2026-11-08）
+  原本每秒在聊天里刷「服务器将在 N 秒后生成新世界」，打起来时刷屏严重。
+  - 现在：进入倒计时后显示红色 Boss 栏并每秒递减，进度条随剩余时间收缩；
+    聊天只保留「所有 runner 已淘汰」和「正在生成新世界」两条一次性提示。
+  - 取消倒计时、重置失败、服务器启动都会清掉 Boss 栏；倒计时中途进服的玩家会自动看到。
+  - 涉及：`GameManager.java`、`README.md`
 
 ## 已确认正常
 

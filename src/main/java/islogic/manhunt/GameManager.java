@@ -4,11 +4,15 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerBossEvent;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.players.NameAndId;
+import net.minecraft.world.BossEvent;
 import net.minecraft.world.food.FoodData;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 public class GameManager implements ServerTickEvents.EndTick {
@@ -17,7 +21,7 @@ public class GameManager implements ServerTickEvents.EndTick {
     private enum Phase {
         WAITING,     // 等待开局：冻结玩家，检查开始条件
         RUNNING,     // 游戏进行中：什么都不做，只等 runner 死
-        COUNTDOWN    // 重置倒计时中：每秒播报，归零就生成新世界
+        COUNTDOWN    // 重置倒计时中：Boss 栏显示倒计时，归零就生成新世界
     }
 
     private static final int CHECK_INTERVAL = 5;
@@ -27,7 +31,8 @@ public class GameManager implements ServerTickEvents.EndTick {
 
     private Phase phase = Phase.WAITING;
     private int countdownStartTick = 0;
-    private int lastBroadcastSecond = -1;
+    private ServerBossEvent countdownBar;   // COUNTDOWN 阶段才有，其他阶段为 null
+    private int lastBarSecond = -1;         // 上一次写进 Boss 栏的秒数
 
     @Override
     public void onEndTick(MinecraftServer server) {
@@ -64,7 +69,7 @@ public class GameManager implements ServerTickEvents.EndTick {
             UUID id = elimination.id();
             String name = RunnerTracker.nameOf(id);
             TeamManager.removeFromTeam(server, "runners", name);
-            CompassTicker.clearRunner(id);
+            CompassTicker.clearRunner(name);
             String reason = elimination.timedOut()
                     ? "掉线超时，视为淘汰"
                     : "已死亡，离开 runners 队伍";
@@ -75,19 +80,18 @@ public class GameManager implements ServerTickEvents.EndTick {
         if (RunnerTracker.isGameOver()) {
             phase = Phase.COUNTDOWN;
             countdownStartTick = tickCounter;
-            lastBroadcastSecond = -1;
+            lastBarSecond = -1;
             server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("所有 runner 已淘汰，服务器将在 "
-                            + RESET_DELAY_SECONDS + " 秒后生成新世界"), false);
+                    Component.literal("所有 runner 已淘汰，新世界生成倒计时开始"), false);
         }
     }
 
-    /** 倒计时中：每秒播报，归零就重置世界 */
+    /** 倒计时中：Boss 栏显示剩余秒数，归零就重置世界 */
     private void onCountdown(MinecraftServer server) {
         // 兜底：阵亡记录被清掉时取消倒计时，避免误删档
         if (!RunnerTracker.isGameOver()) {
             phase = Phase.RUNNING;
-            lastBroadcastSecond = -1;
+            clearCountdownBar();
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("runner 阵亡记录已清空，倒计时取消"), false);
             return;
@@ -97,6 +101,7 @@ public class GameManager implements ServerTickEvents.EndTick {
         int secondsLeft = RESET_DELAY_SECONDS - elapsedTicks / 20;
 
         if (secondsLeft <= 0) {
+            clearCountdownBar();
             server.getPlayerList().broadcastSystemMessage(
                     Component.literal("正在生成新世界，请稍候..."), false);
             try {
@@ -107,7 +112,6 @@ public class GameManager implements ServerTickEvents.EndTick {
                     return;
                 }
                 phase = Phase.WAITING;
-                lastBroadcastSecond = -1;
             } catch (Throwable t) {
                 Manhunt.LOGGER.error("[Manhunt] 生成新世界失败", t);
                 server.getPlayerList().broadcastSystemMessage(
@@ -117,11 +121,57 @@ public class GameManager implements ServerTickEvents.EndTick {
             return;
         }
 
-        if (secondsLeft != lastBroadcastSecond) {
-            lastBroadcastSecond = secondsLeft;
-            server.getPlayerList().broadcastSystemMessage(
-                    Component.literal("服务器将在 " + secondsLeft + " 秒后生成新世界"), false);
+        updateCountdownBar(server, secondsLeft, elapsedTicks);
+    }
+
+    /** 创建或更新倒计时 Boss 栏。进度按 tick 平滑变化，文字每秒变一次。 */
+    private void updateCountdownBar(MinecraftServer server, int secondsLeft, int elapsedTicks) {
+        int totalTicks = RESET_DELAY_SECONDS * 20;
+        float progress = Math.max(0.0F, (totalTicks - elapsedTicks) / (float) totalTicks);
+
+        if (countdownBar == null) {
+            // 每局用新的 UUID，避免上一局的客户端状态残留
+            countdownBar = new ServerBossEvent(UUID.randomUUID(),
+                    Component.literal("服务器将在 " + secondsLeft + " 秒后生成新世界"),
+                    BossEvent.BossBarColor.RED, BossEvent.BossBarOverlay.PROGRESS);
+            countdownBar.setProgress(progress);
+            countdownBar.setVisible(true);
+            lastBarSecond = secondsLeft;
+        } else {
+            countdownBar.setProgress(progress);
+            if (secondsLeft != lastBarSecond) {
+                lastBarSecond = secondsLeft;
+                countdownBar.setName(
+                        Component.literal("服务器将在 " + secondsLeft + " 秒后生成新世界"));
+            }
         }
+
+        syncCountdownBar(server);
+    }
+
+    /** 让 Boss 栏的接收者始终等于当前在线玩家：中途进服能看到，掉线的不再保留引用。 */
+    private void syncCountdownBar(MinecraftServer server) {
+        Set<UUID> online = new HashSet<>();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            online.add(player.getUUID());
+            countdownBar.addPlayer(player);   // 已在集合里时是空操作
+        }
+        for (ServerPlayer player : List.copyOf(countdownBar.getPlayers())) {
+            if (!online.contains(player.getUUID())) {
+                countdownBar.removePlayer(player);
+            }
+        }
+    }
+
+    /** 关掉并丢弃 Boss 栏；先 setVisible(false)，客户端会立即移除。 */
+    private void clearCountdownBar() {
+        if (countdownBar == null) {
+            return;
+        }
+        countdownBar.setVisible(false);
+        countdownBar.removeAllPlayers();
+        countdownBar = null;
+        lastBarSecond = -1;
     }
 
     /** 每次服务器启动时调用，清空上一局残留的状态 */
@@ -129,7 +179,7 @@ public class GameManager implements ServerTickEvents.EndTick {
         phase = Phase.WAITING;
         tickCounter = 0;
         countdownStartTick = 0;
-        lastBroadcastSecond = -1;
+        clearCountdownBar();
         RunnerTracker.clear();
     }
 

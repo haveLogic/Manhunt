@@ -8,8 +8,10 @@ import net.minecraft.world.scores.Scoreboard;
 import net.minecraft.world.scores.TeamColor;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 public class TeamManager {
     public static void createTeams(MinecraftServer server) {
@@ -86,6 +88,22 @@ public class TeamManager {
             }
         }
         return runners;
+    }
+
+    /**
+     * runners 队伍的全部成员名，包含已经离线的玩家。
+     *
+     * <p>用于判断一条指南针缓存是否还属于本局：队伍可能被 `/team` 等命令直接改动，
+     * 不能只依赖某个命令里的清理动作。
+     */
+    public static Set<String> getRunnerNames(MinecraftServer server) {
+        Scoreboard scoreboard = server.getScoreboard();
+        for (PlayerTeam team : scoreboard.getPlayerTeams()) {
+            if ("runners".equals(team.getName())) {
+                return new HashSet<>(team.getPlayers());
+            }
+        }
+        return Set.of();
     }
 
     /** 把指定玩家移出指定队伍；队伍不存在时静默返回。 */
